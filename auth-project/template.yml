@@ -1,0 +1,83 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Authentication API Stack - v0.01
+Parameters:
+  UpdateTrigger:
+    Type: String
+    Default: "0"
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        DYNAMO_TABLE: !Ref DynamoTable
+        DOMAIN: !Ref DomainParam
+        COGNITO_USER_POOL_ID: !Ref CognitoUserPool
+
+Resources:
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AuthUsers
+      AttributeDefinitions:
+        - AttributeName: username
+          AttributeType: S
+      KeySchema:
+        - AttributeName: username
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: AuthUserPool
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+        - Name: custom:biometricStatus
+          AttributeDataType: String
+          Mutable: true
+
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: main.handler
+      CodeUri: auth_backend.zip
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt DynamoTable.Arn
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminUpdateUserAttributes
+              Resource: !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPool}'
+      Metadata:
+        UpdateTrigger: !Ref UpdateTrigger
+
+Outputs:
+  ApiEndpoint:
+    Description: Default execute-api endpoint
+    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod'
+  DomainParam:
+    Description: Domain for the application
+    Value: !Ref AWS::StackName
