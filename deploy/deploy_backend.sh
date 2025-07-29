@@ -14,13 +14,11 @@ set -euo pipefail
 #   ./deploy/deploy_backend.sh [--local-only]
 #
 # Flags:
-#   --local-only    only build and run locally (in Docker),
+#   --local-only    only build and run locally (in Docker) with automated tests,
 #                   skip all AWS deploy steps
 # ---------------------------------------------------------
 
 LOCAL_ONLY=false
-# Default architecture for Lambda (fixed to x86_64 for Lambda compatibility)
-PACKAGE_ARCH="x86_64"
 
 # parse flags
 while [[ $# -gt 0 ]]; do
@@ -37,7 +35,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if $LOCAL_ONLY; then
-  echo "🚀 Starting full deployment (local-only)..."
+  echo "🚀 Starting full local deployment with automated tests..."
 
   echo ""
   echo "🧩 Running module: 01_package_lambda.sh"
@@ -45,43 +43,109 @@ if $LOCAL_ONLY; then
 
   echo ""
   echo "📦 Building local Docker image for Lambda..."
-  DOCKER_PLATFORM="--platform linux/amd64"
   docker build \
-    $DOCKER_PLATFORM \
+    --platform linux/amd64 \
     -f dashboard-app/backend/Dockerfile \
     -t auth-lambda \
-    dashboard-app/backend
+    dashboard-app/backend || {
+      echo "❌ Docker build failed."
+      exit 1
+    }
 
   echo ""
   echo "🚀 Starting local Lambda container..."
   docker rm -f auth-local 2>/dev/null || true
-  docker run -d -p 9000:8080 \
+  docker run -d -p 3000:8080 \
     -e DYNAMO_TABLE=AuthUsers \
     -e DOMAIN=localhost \
     -e COGNITO_USER_POOL_ID=local-pool \
+    -e COGNITO_CLIENT_ID=testclientid \
+    -e JWT_SECRET=your-secret-key \
     --name auth-local \
-    auth-lambda
-  echo "✅ auth-lambda is up on http://localhost:9000"
+    auth-lambda || {
+      echo "❌ Failed to start Docker container."
+      exit 1
+    }
+  echo "✅ auth-lambda is up on http://localhost:3000"
+
+  # Wait for the container to be ready
+  sleep 2
+
+  # Automated Tests
+  echo ""
+  echo "🔍 Running automated tests..."
+
+  # Test 1: Initial Login
+  echo "🧪 Test 1: Initial Login"
+  LOGIN_RESPONSE=$(curl -s -X POST http://localhost:3000/login \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d 'username=test@example.com&password=InitialPass123!')
+  if [[ "$(echo "$LOGIN_RESPONSE" | jq -r '.message')" == "First login detected. Please change your password." &&
+        "$(echo "$LOGIN_RESPONSE" | jq -r '.requires_change')" == "true" &&
+        "$(echo "$LOGIN_RESPONSE" | jq -r '.token')" == "null" ]]; then
+    echo "✅ Test 1 Passed: Initial login detected."
+  else
+    echo "❌ Test 1 Failed: Expected {\"message\":\"First login detected. Please change your password.\",\"requires_change\":true,\"token\":null}, got: $LOGIN_RESPONSE"
+    docker stop auth-local
+    docker rm auth-local
+    exit 1
+  fi
+
+  # Test 2: Change Password
+  echo "🧪 Test 2: Change Password"
+  CHANGE_RESPONSE=$(curl -s -X POST http://localhost:3000/change-password \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d 'username=test@example.com&old_password=InitialPass123!&new_password=NewPass123!')
+  if [[ "$(echo "$CHANGE_RESPONSE" | jq -r '.message')" == "Password changed. Proceed to TOTP setup." ]]; then
+    echo "✅ Test 2 Passed: Password changed."
+  else
+    echo "❌ Test 2 Failed: Expected {\"message\":\"Password changed. Proceed to TOTP setup.\"}, got: $CHANGE_RESPONSE"
+    docker stop auth-local
+    docker rm auth-local
+    exit 1
+  fi
+
+  # Test 3: Setup TOTP
+  echo "🧪 Test 3: Setup TOTP"
+  TOTP_SECRET=$(echo "$LOGIN_RESPONSE" | jq -r '.message' | grep -o 'Use secret: [A-Z0-9]*' | cut -d' ' -f3)
+  if [ -n "$TOTP_SECRET" ]; then
+    TOTP_CODE=$(python3 -c "import pyotp; print(pyotp.TOTP('$TOTP_SECRET').now())" 2>/dev/null || echo "123456")
+    TOTP_RESPONSE=$(curl -s -X POST http://localhost:3000/setup-totp \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "username=test@example.com&totp_code=$TOTP_CODE&token=dummy-jwt-token")
+    if [[ "$(echo "$TOTP_RESPONSE" | jq -r '.message')" == "TOTP setup complete. Proceed to biometric setup." ]]; then
+      echo "✅ Test 3 Passed: TOTP setup complete."
+    else
+      echo "❌ Test 3 Failed: Expected {\"message\":\"TOTP setup complete. Proceed to biometric setup.\"}, got: $TOTP_RESPONSE"
+      docker stop auth-local
+      docker rm auth-local
+      exit 1
+    fi
+  else
+    echo "❌ Test 3 Failed: Could not extract TOTP secret."
+    docker stop auth-local
+    docker rm auth-local
+    exit 1
+  fi
+
+  # Test 4: Setup Biometric
+  echo "🧪 Test 4: Setup Biometric"
+  BIOMETRIC_RESPONSE=$(curl -s -X POST http://localhost:3000/setup-biometric \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "username=test@example.com&token=dummy-jwt-token")
+  if [[ "$(echo "$BIOMETRIC_RESPONSE" | jq -r '.message')" == "Biometric setup complete. Login with biometrics next time." ]]; then
+    echo "✅ Test 4 Passed: Biometric setup complete."
+  else
+    echo "❌ Test 4 Failed: Expected {\"message\":\"Biometric setup complete. Login with biometrics next time.\"}, got: $BIOMETRIC_RESPONSE"
+    docker stop auth-local
+    docker rm auth-local
+    exit 1
+  fi
 
   echo ""
-  echo "🔍 Testing POST /login with initial credentials..."
-  curl -s -XPOST http://localhost:9000/2015-03-31/functions/function/invocations \
-    -H "Content-Type: application/json" \
-    -d '{
-      "version":"2.0",
-      "routeKey":"POST /login",
-      "rawPath":"/login",
-      "rawQueryString":"",
-      "headers":{"content-type":"application/x-www-form-urlencoded"},
-      "requestContext":{"http":{"method":"POST","path":"/login","sourceIp":"127.0.0.1"}},
-      "body":"username=testuser&password=InitialPass123!",
-      "isBase64Encoded":false
-    }' | jq .
-
-  echo ""
-  echo "✅ Local-only deployment complete. Test manually with:"
-  echo "   curl -v -X POST http://localhost:9000/login -H \"Content-Type: application/x-www-form-urlencoded\" -d 'username=testuser&password=InitialPass123!'"
-  echo "   Follow prompts for password change and TOTP setup."
+  echo "✅ All local tests passed successfully."
+  docker stop auth-local
+  docker rm auth-local
   exit 0
 fi
 
@@ -106,7 +170,6 @@ export ROLE_NAME="AuthLambdaRole"
 export POLICY_ARN="arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
 export BUILD_DIR="dashboard-app/backend/build"
 export API_NAME="auth-api"
-export PACKAGE_ARCH
 
 # Version management
 TEMPLATE_FILE="template.yml"
@@ -115,7 +178,7 @@ VERSION_DEFAULT="0.01"
 
 # Extract current version or set default
 if [ -f "$TEMPLATE_FILE" ]; then
-  CURRENT_VERSION=$(awk -F': ' "/^${VERSION_KEY}:/ {print \$2}" "$TEMPLATE_FILE" | grep -oE '[0-9]+\.[0-9]+' || echo "$VERSION_DEFAULT")
+  CURRENT_VERSION=$(grep "^${VERSION_KEY}:" "$TEMPLATE_FILE" | sed 's/.*v\([0-9]\+\.[0-9]\+\).*/\1/' || echo "$VERSION_DEFAULT")
   if [ -z "$CURRENT_VERSION" ]; then
     CURRENT_VERSION="$VERSION_DEFAULT"
   fi
@@ -129,13 +192,9 @@ NEW_VERSION_NUM=$((VERSION_NUM + 1))
 NEW_VERSION=$(printf "%.2f" "$(echo "$NEW_VERSION_NUM/100" | bc -l)")
 
 # Generate a new SECRET_KEY securely and update template.yml
-SECRET_KEY=$(~/dev/dashboard-venv/bin/python -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null)
-{
-  sed -i.bak "s/^${VERSION_KEY}: .*/${VERSION_KEY}: Authentication API Stack - v${NEW_VERSION} (SECRET_KEY updated)/" "$TEMPLATE_FILE" && rm -f "${TEMPLATE_FILE}.bak"
-  sed -i.bak "s/SECRET_KEY: .*/SECRET_KEY: $SECRET_KEY/" "$TEMPLATE_FILE" && rm -f "${TEMPLATE_FILE}.bak"
-} > /dev/null 2>&1
-unset SECRET_KEY
-echo "📝 Updated version in $TEMPLATE_FILE to v${NEW_VERSION} with new SECRET_KEY"
+SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+sed -i.bak "s/^${VERSION_KEY}: .*/${VERSION_KEY}: Authentication API Stack - v${NEW_VERSION} (SECRET_KEY: ${SECRET_KEY})/" "$TEMPLATE_FILE" && rm -f "${TEMPLATE_FILE}.bak"
+echo "📝 Updated version in $TEMPLATE_FILE to v${NEW_VERSION} with new SECRET_KEY: ${SECRET_KEY}"
 
 # Run deployment modules
 for step in \
@@ -149,7 +208,10 @@ for step in \
 do
   echo ""
   echo "🧩 Running module: $step"
-  . "$MODULES/$step"
+  . "$MODULES/$step" || {
+    echo "❌ Module $step failed. Aborting deployment."
+    exit 1
+  }
 done
 
 # Update CloudFormation stack with the new version
@@ -161,8 +223,8 @@ if [ "$DRY_RUN" != "true" ]; then
     --region us-east-1 \
     --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
     --parameters ParameterKey=UpdateTrigger,ParameterValue=$(date +%s) \
-    ParameterKey=DomainParam,ParameterValue=$(hostname -f) \
-    ParameterKey=CognitoUserPool,UsePreviousValue=true || {
+    ParameterKey=JwtSecretParameter,ParameterValue="${SECRET_KEY}" \
+    || {
       echo "⚠️ Stack update failed, checking if stack exists..."
       if aws cloudformation describe-stacks --stack-name auth-stack --region us-east-1 >/dev/null 2>&1; then
         echo "ℹ️ Stack exists, attempting update again with full capabilities..."
@@ -172,8 +234,7 @@ if [ "$DRY_RUN" != "true" ]; then
           --region us-east-1 \
           --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
           --parameters ParameterKey=UpdateTrigger,ParameterValue=$(date +%s) \
-          ParameterKey=DomainParam,ParameterValue=$(hostname -f) \
-          ParameterKey=CognitoUserPool,UsePreviousValue=true
+          ParameterKey=JwtSecretParameter,ParameterValue="${SECRET_KEY}"
       else
         echo "⚠️ Stack does not exist, creating new stack..."
         aws cloudformation create-stack \
@@ -181,7 +242,8 @@ if [ "$DRY_RUN" != "true" ]; then
           --template-body file://template.yml \
           --region us-east-1 \
           --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-          --parameters ParameterKey=DomainParam,ParameterValue=$(hostname -f)
+          --parameters ParameterKey=UpdateTrigger,ParameterValue=$(date +%s) \
+          ParameterKey=JwtSecretParameter,ParameterValue="${SECRET_KEY}"
       fi
     }
   aws cloudformation wait stack-create-complete --stack-name auth-stack --region us-east-1 || {
