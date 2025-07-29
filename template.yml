@@ -5,6 +5,9 @@ Parameters:
   UpdateTrigger:
     Type: String
     Default: "0"
+  JwtSecretParameter:
+    Type: String
+    Default: "your-secret-key"  # Replace with secure value or use AWS Secrets Manager
 
 Globals:
   Function:
@@ -15,8 +18,10 @@ Globals:
     Environment:
       Variables:
         DYNAMO_TABLE: !Ref DynamoTable
-        DOMAIN: !Ref DomainParam
+        DOMAIN: !Ref AWS::StackName
         COGNITO_USER_POOL_ID: !Ref CognitoUserPool
+        COGNITO_CLIENT_ID: !Ref CognitoAppClient
+        JWT_SECRET: !Ref JwtSecretParameter
 
 Resources:
   DynamoTable:
@@ -35,21 +40,39 @@ Resources:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: AuthUserPool
+      UsernameAttributes:
+        - email
       AutoVerifiedAttributes:
         - email
       Schema:
-        - Name: email
-          AttributeDataType: String
-          Mutable: true
         - Name: custom:biometricStatus
           AttributeDataType: String
           Mutable: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+          RequireLowercase: true
+
+  CognitoAppClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: auth-app-client
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      PreventUserExistenceErrors: ENABLED
 
   AuthFunction:
     Type: AWS::Serverless::Function
     Properties:
       Handler: main.handler
-      CodeUri: auth_backend.zip
+      CodeUri: dashboard-app/backend/
       Events:
         Api:
           Type: Api
@@ -70,14 +93,21 @@ Resources:
             - Effect: Allow
               Action:
                 - cognito-idp:AdminUpdateUserAttributes
+                - cognito-idp:SignUp
+                - cognito-idp:ConfirmSignUp
+                - cognito-idp:InitiateAuth
+                - cognito-idp:RespondToAuthChallenge
               Resource: !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPool}'
-      Metadata:
-        UpdateTrigger: !Ref UpdateTrigger
+    Metadata:
+      UpdateTrigger: !Ref UpdateTrigger
 
 Outputs:
   ApiEndpoint:
     Description: Default execute-api endpoint
     Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod'
-  DomainParam:
-    Description: Domain for the application
-    Value: !Ref AWS::StackName
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+  CognitoAppClientId:
+    Description: Cognito App Client ID
+    Value: !Ref CognitoAppClient

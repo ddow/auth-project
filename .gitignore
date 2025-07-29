@@ -1,0 +1,41 @@
+# Ignore Python virtual environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+env.bak/
+venv.bak/
+dashboard-venv/
+
+# Ignore SAM CLI build artifacts
+.aws-sam/
+*.zip
+
+# Ignore Docker artifacts
+docker-compose.yml
+Dockerfile.local  # If you create local variants
+*.dockerignore
+
+# Ignore local configuration and environment files
+env.json
+*.env
+!.env.example      # Keep an example file if provided
+
+# Ignore IDE and editor files
+.idea/
+*.sublime-*
+*.swp
+*~
+
+# Ignore OS-generated files
+.DS_Store
+
+# Ignore logs and temporary files
+*.log
+*.tmp
+
+# Ignore node_modules (if frontend grows)
+node_modules/
