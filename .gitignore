@@ -39,3 +39,5 @@ env.json
 
 # Ignore node_modules (if frontend grows)
 node_modules/
+/dashboard-app/backend/build-temp
+/dashboard-app/backend/build

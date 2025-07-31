@@ -1,162 +1,194 @@
 import os
-import json
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Form
+from mangum import Mangum
 import boto3
-from fastapi import FastAPI, HTTPException, Depends, Form
-from fastapi.security import OAuth2PasswordBearer
+import boto3.dynamodb.conditions as conditions
 from passlib.context import CryptContext
 import pyotp
 import jwt
-import time
-from mangum import Mangum
+from datetime import datetime, timedelta
 
-app = FastAPI()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Log environment variables for debugging
+print("Environment variables:", {k: v for k, v in os.environ.items()})
+is_local = os.getenv("IS_LOCAL", "false").lower() == "true"
+print("IS_LOCAL:", is_local)
+
+# Initialize FastAPI app
+api_gateway_base_path = "" if is_local else "/Prod"
+app = FastAPI(root_path=api_gateway_base_path)
 
 # Mock DynamoDB and Cognito for local testing
-class MockDynamoDB:
-    def __init__(self):
-        self.table = {
-            "test@example.com": {
-                "password_hash": pwd_context.hash("InitialPass123!"),
-                "first_login": True,
-                "totp_secret": pyotp.random_base32(),
-                "totp_setup": False,
-                "biometric_setup": False
-            }
-        }
-
-    def get_item(self, Key):
-        return {"Item": self.table.get(Key.get('username'))}
-
-    def update_item(self, Key, UpdateExpression, ExpressionAttributeValues):
-        username = Key['username']
-        if username not in self.table:
-            self.table[username] = {}
-        # Parse UpdateExpression and apply values
-        expr_parts = UpdateExpression.replace('SET ', '').split(', ')
-        for part in expr_parts:
-            attr = part.split(' = ')[0].replace('#', '')
-            value_key = part.split(' = ')[1]
-            self.table[username][attr] = ExpressionAttributeValues.get(value_key)
-        print(f"Debug: update_user - Username: {username}, Table: {self.table}")  # Debug
-
-class MockCognito:
-    def admin_update_user_attributes(self, UserPoolId, Username, UserAttributes):
-        pass  # No-op for local testing
-
-# Use mocks if running locally
-is_local = os.getenv('AWS_SAM_LOCAL', 'false').lower() == 'true'
 if is_local:
-    dynamodb = MockDynamoDB()
-    cognito = MockCognito()
+    print("Using MockDynamoTable and MockCognitoClient")
+
+
+    class MockDynamoTable:
+        def get_item(self, Key):
+            return {
+                "Item": {
+                    "username": Key["username"],
+                    "password": "$2b$12$KIXp8e8f9z2b3c4d5e6f7u",  # Mock hashed password (InitialPass123!)
+                    "requires_change": True,
+                    "totp_secret": None,
+                    "biometric_key": None
+                }
+            }
+
+        def put_item(self, Item):
+            return {}
+
+        def update_item(self, Key, UpdateExpression, ExpressionAttributeValues):
+            return {}
+
+
+    table = MockDynamoTable()
+
+
+    class MockCognitoClient:
+        def admin_create_user(self, UserPoolId, Username, TemporaryPassword):
+            return {}
+
+        def admin_initiate_auth(self, UserPoolId, ClientId, AuthFlow, AuthParameters):
+            return {"AuthenticationResult": {"IdToken": "dummy-jwt-token"}}
+
+        def admin_respond_to_auth_challenge(self, UserPoolId, ClientId, ChallengeName, Session, ChallengeResponses):
+            return {"AuthenticationResult": {"IdToken": "dummy-jwt-token"}}
+
+
+    cognito_client = MockCognitoClient()
 else:
-    dynamodb = boto3.resource('dynamodb')
-    cognito = boto3.client('cognito-idp')
+    print("Using real DynamoDB and Cognito")
+    dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+    table = dynamodb.Table(os.getenv("DYNAMO_TABLE", "AuthUsers"))
+    cognito_client = boto3.client("cognito-idp", region_name="us-east-1")
 
-table = dynamodb if is_local else dynamodb.Table(os.environ['DYNAMO_TABLE'])
-DOMAIN = os.environ.get('DOMAIN', 'default-domain')
-COGNITO_USER_POOL_ID = os.environ.get('COGNITO_USER_POOL_ID')
-COGNITO_CLIENT_ID = os.environ.get('COGNITO_CLIENT_ID')
-JWT_SECRET = os.environ.get('JWT_SECRET', 'your-secret-key')
-INITIAL_PASSWORD = "InitialPass123!"
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key")
+COGNITO_USER_POOL_ID = os.getenv("COGNITO_USER_POOL_ID", "local-pool")
+COGNITO_CLIENT_ID = os.getenv("COGNITO_CLIENT_ID", "testclientid")
 
-def get_user(username: str):
-    response = table.get_item(Key={'username': username})
-    print(f"Debug: get_user - Username: {username}, Response: {response}")  # Debug
-    return response.get('Item')
 
-def update_user(username: str, update_expr, expr_values):
-    if is_local:
-        table.update_item(Key={'username': username}, UpdateExpression=update_expr, ExpressionAttributeValues=expr_values)
-    else:
-        table.update_item(Key={'username': username}, UpdateExpression=update_expr, ExpressionAttributeValues=expr_values)
-    print(f"Debug: update_user - Username: {username}, Update: {update_expr}, Values: {expr_values}")  # Debug
+def get_user(username: str) -> Optional[dict]:
+    response = table.get_item(Key={"username": username})
+    return response.get("Item")
 
-def verify_password(plain_password, hashed_password):
-    result = pwd_context.verify(plain_password, hashed_password) if hashed_password else False
-    print(f"Debug: verify_password - Plain: {plain_password}, Hashed: {hashed_password}, Result: {result}")  # Debug
-    return result
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
 
-def create_jwt_token(username: str):
-    payload = {"sub": username, "exp": int(time.time()) + 3600}  # 1-hour expiration
+
+def create_jwt_token(username: str) -> str:
+    payload = {
+        "sub": username,
+        "exp": datetime.utcnow() + timedelta(hours=24)
+    }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
 
 @app.post("/login")
 async def login(username: str = Form(...), password: str = Form(...)):
     user = get_user(username)
-    print(f"Debug: login - User: {user}, Password: {password}")  # Debug
-    if not user or not verify_password(password, user.get('password_hash', '')):
+    if not user:
+        if is_local:
+            table.put_item(Item={
+                "username": username,
+                "password": pwd_context.hash(password),
+                "requires_change": True,
+                "totp_secret": None,
+                "biometric_key": None
+            })
+            user = get_user(username)
+        else:
+            try:
+                cognito_client.admin_create_user(
+                    UserPoolId=COGNITO_USER_POOL_ID,
+                    Username=username,
+                    TemporaryPassword=password
+                )
+                user = get_user(username)
+            except cognito_client.exceptions.ClientError:
+                raise HTTPException(status_code=400, detail="User creation failed")
+
+    if not verify_password(password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if user.get('first_login', True):
-        return {"message": "First login detected. Please change your password.", "requires_change": True, "token": None}
+    if user.get("requires_change", False):
+        return {
+            "message": "First login detected. Please change your password.",
+            "requires_change": True,
+            "token": None
+        }
 
-    if not user.get('totp_setup', False):
-        totp_secret = pyotp.random_base32()
-        update_user(username, "SET totp_secret = :s", {":s": totp_secret})
-        return {"message": "TOTP setup required. Use secret: " + totp_secret, "requires_totp": True, "token": None}
-
-    if not user.get('biometric_setup', False):
-        return {"message": "Biometric setup required. Contact admin.", "requires_biometric": True, "token": None}
+    if user.get("totp_secret"):
+        return {
+            "message": "TOTP required",
+            "requires_totp": True,
+            "token": None
+        }
 
     token = create_jwt_token(username)
-    return {"access_token": token, "token_type": "bearer"}
+    return {"message": "Login successful", "token": token}
+
 
 @app.post("/change-password")
 async def change_password(username: str = Form(...), old_password: str = Form(...), new_password: str = Form(...)):
     user = get_user(username)
-    if not user or not verify_password(old_password, user.get('password_hash', '')):
+    if not user or not verify_password(old_password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if not user.get('first_login', True):
-        raise HTTPException(status_code=403, detail="Password change only allowed on first login")
-
-    new_hash = get_password_hash(new_password)
-    update_user(username, "SET password_hash = :p, first_login = :f", {":p": new_hash, ":f": False})
+    table.update_item(
+        Key={"username": username},
+        UpdateExpression="SET password = :p, requires_change = :r",
+        ExpressionAttributeValues={
+            ":p": pwd_context.hash(new_password),
+            ":r": False
+        }
+    )
     return {"message": "Password changed. Proceed to TOTP setup."}
 
+
 @app.post("/setup-totp")
-async def setup_totp(username: str = Form(...), totp_code: str = Form(...), token: str = Depends(oauth2_scheme)):
+async def setup_totp(username: str = Form(...), totp_code: str = Form(...), token: str = Form(...)):
+    user = get_user(username)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
     try:
         jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user = get_user(username)
-    if not user or not user.get('totp_secret'):
-        raise HTTPException(status_code=400, detail="TOTP not initialized")
-
-    totp = pyotp.TOTP(user['totp_secret'])
+    secret = pyotp.random_base32()
+    totp = pyotp.TOTP(secret)
     if not totp.verify(totp_code):
         raise HTTPException(status_code=401, detail="Invalid TOTP code")
 
-    update_user(username, "SET totp_setup = :t", {":t": True})
+    table.update_item(
+        Key={"username": username},
+        UpdateExpression="SET totp_secret = :s",
+        ExpressionAttributeValues={":s": secret}
+    )
     return {"message": "TOTP setup complete. Proceed to biometric setup."}
 
+
 @app.post("/setup-biometric")
-async def setup_biometric(username: str = Form(...), token: str = Depends(oauth2_scheme)):
+async def setup_biometric(username: str = Form(...), token: str = Form(...)):
+    user = get_user(username)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
     try:
         jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user = get_user(username)
-    if not user or not user.get('totp_setup', False):
-        raise HTTPException(status_code=400, detail="Complete TOTP setup first")
-
-    if is_local:
-        print(f"Debug: Mocking biometric setup for {username}")  # Debug
-    else:
-        cognito.admin_update_user_attributes(
-            UserPoolId=COGNITO_USER_POOL_ID,
-            Username=username,
-            UserAttributes=[{'Name': 'custom:biometricStatus', 'Value': 'enabled'}]
-        )
-    update_user(username, "SET biometric_setup = :b", {":b": True})
+    table.update_item(
+        Key={"username": username},
+        UpdateExpression="SET biometric_key = :b",
+        ExpressionAttributeValues={":b": "mock-biometric-key"}
+    )
     return {"message": "Biometric setup complete. Login with biometrics next time."}
+
 
 handler = Mangum(app)

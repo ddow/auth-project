@@ -14,7 +14,7 @@ set -euo pipefail
 #   ./deploy/deploy_backend.sh [--local-only]
 #
 # Flags:
-#   --local-only    only build and run locally (in Docker) with automated tests,
+#   --local-only    only build and run locally (using SAM CLI) with automated tests,
 #                   skip all AWS deploy steps
 # ---------------------------------------------------------
 
@@ -35,41 +35,47 @@ while [[ $# -gt 0 ]]; do
 done
 
 if $LOCAL_ONLY; then
-  echo "🚀 Starting full local deployment with automated tests..."
+  echo "🚀 Starting full local deployment with automated tests using SAM CLI..."
 
   echo ""
   echo "🧩 Running module: 01_package_lambda.sh"
   bash "$(dirname "$0")/modules/01_package_lambda.sh"
 
   echo ""
-  echo "📦 Building local Docker image for Lambda..."
-  docker build \
-    --platform linux/amd64 \
-    -f dashboard-app/backend/Dockerfile \
-    -t auth-lambda \
-    dashboard-app/backend || {
-      echo "❌ Docker build failed."
-      exit 1
-    }
+  echo "📦 Building SAM project..."
+  sam build || {
+    echo "❌ SAM build failed."
+    exit 1
+  }
 
   echo ""
-  echo "🚀 Starting local Lambda container..."
-  docker rm -f auth-local 2>/dev/null || true
-  docker run -d -p 3000:8080 \
-    -e DYNAMO_TABLE=AuthUsers \
-    -e DOMAIN=localhost \
-    -e COGNITO_USER_POOL_ID=local-pool \
-    -e COGNITO_CLIENT_ID=testclientid \
-    -e JWT_SECRET=your-secret-key \
-    --name auth-local \
-    auth-lambda || {
-      echo "❌ Failed to start Docker container."
-      exit 1
+  echo "🚀 Starting local API with SAM..."
+  # Create env.json for SAM
+  cat > env.json << EOF
+  {
+    "AuthFunction": {
+      "DYNAMO_TABLE": "AuthUsers",
+      "DOMAIN": "localhost",
+      "COGNITO_USER_POOL_ID": "local-pool",
+      "COGNITO_CLIENT_ID": "testclientid",
+      "JWT_SECRET": "your-secret-key",
+      "IS_LOCAL": "true",
+      "AWS_SAM_LOCAL": "true"
     }
-  echo "✅ auth-lambda is up on http://localhost:3000"
+  }
+EOF
 
-  # Wait for the container to be ready
-  sleep 2
+  # Start SAM local API in the background
+  sam local start-api --docker-network host --env-vars env.json --port 3000 --debug --container-env-vars "{\"IS_LOCAL\":\"true\",\"AWS_SAM_LOCAL\":\"true\",\"DYNAMO_TABLE\":\"AuthUsers\",\"DOMAIN\":\"localhost\",\"COGNITO_USER_POOL_ID\":\"local-pool\",\"COGNITO_CLIENT_ID\":\"testclientid\",\"JWT_SECRET\":\"your-secret-key\"}" &
+  SAM_PID=$!
+  sleep 10  # Increased wait time for API to stabilize
+
+  # Check if SAM is running
+  if ! ps -p $SAM_PID > /dev/null; then
+    echo "❌ Failed to start SAM local API."
+    exit 1
+  fi
+  echo "✅ auth-lambda is up on http://localhost:3000"
 
   # Automated Tests
   echo ""
@@ -86,8 +92,7 @@ if $LOCAL_ONLY; then
     echo "✅ Test 1 Passed: Initial login detected."
   else
     echo "❌ Test 1 Failed: Expected {\"message\":\"First login detected. Please change your password.\",\"requires_change\":true,\"token\":null}, got: $LOGIN_RESPONSE"
-    docker stop auth-local
-    docker rm auth-local
+    kill $SAM_PID 2>/dev/null || true
     exit 1
   fi
 
@@ -100,8 +105,7 @@ if $LOCAL_ONLY; then
     echo "✅ Test 2 Passed: Password changed."
   else
     echo "❌ Test 2 Failed: Expected {\"message\":\"Password changed. Proceed to TOTP setup.\"}, got: $CHANGE_RESPONSE"
-    docker stop auth-local
-    docker rm auth-local
+    kill $SAM_PID 2>/dev/null || true
     exit 1
   fi
 
@@ -117,14 +121,12 @@ if $LOCAL_ONLY; then
       echo "✅ Test 3 Passed: TOTP setup complete."
     else
       echo "❌ Test 3 Failed: Expected {\"message\":\"TOTP setup complete. Proceed to biometric setup.\"}, got: $TOTP_RESPONSE"
-      docker stop auth-local
-      docker rm auth-local
+      kill $SAM_PID 2>/dev/null || true
       exit 1
     fi
   else
     echo "❌ Test 3 Failed: Could not extract TOTP secret."
-    docker stop auth-local
-    docker rm auth-local
+    kill $SAM_PID 2>/dev/null || true
     exit 1
   fi
 
@@ -137,15 +139,14 @@ if $LOCAL_ONLY; then
     echo "✅ Test 4 Passed: Biometric setup complete."
   else
     echo "❌ Test 4 Failed: Expected {\"message\":\"Biometric setup complete. Login with biometrics next time.\"}, got: $BIOMETRIC_RESPONSE"
-    docker stop auth-local
-    docker rm auth-local
+    kill $SAM_PID 2>/dev/null || true
     exit 1
   fi
 
   echo ""
   echo "✅ All local tests passed successfully."
-  docker stop auth-local
-  docker rm auth-local
+  echo "SAM CLI is still running for manual testing. Press Ctrl+C to stop or run: kill $SAM_PID"
+  wait $SAM_PID 2>/dev/null || true
   exit 0
 fi
 

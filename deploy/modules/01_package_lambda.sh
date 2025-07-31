@@ -7,7 +7,7 @@ echo "📦 Packaging Lambda function…"
 BUILD_DIR="dashboard-app/backend/build"
 ZIP_FILE="auth_backend.zip"
 SOURCE_DIR="dashboard-app/backend"
-STAGE_DIR="/tmp/lambda-build"
+STAGE_DIR="/app/build-temp"
 
 # 🧹 Cleaning old build directory & ZIP
 echo "🧹 Cleaning old build directory & ZIP…"
@@ -25,15 +25,15 @@ docker run --rm \
          cp /app/requirements.txt $STAGE_DIR/ && \
          pip install --upgrade pip && \
          pip install -r $STAGE_DIR/requirements.txt -t $STAGE_DIR --platform manylinux2014_x86_64 --only-binary=:all: --no-deps && \
-         cp /app/main.py $STAGE_DIR/" || {
+         cp /app/main.py $STAGE_DIR/ && \
+         ls -la $STAGE_DIR" || {
   echo "❌ Failed to install dependencies."
   exit 1
 }
 
 # 📦 Creating deployment package
 echo "📦 Creating deployment package…"
-cp "$STAGE_DIR/requirements.txt" "$BUILD_DIR/"
-cp "$STAGE_DIR/main.py" "$BUILD_DIR/"
+cp -r "$SOURCE_DIR/build-temp/." "$BUILD_DIR/"
 cd "$BUILD_DIR" && zip -r "../../$ZIP_FILE" . && cd -
 # ZIP is created in project root
 
