@@ -18,9 +18,12 @@ set -euo pipefail
 #                   skip all AWS deploy steps
 # ---------------------------------------------------------
 
+# Determine the script's root directory once
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 LOCAL_ONLY=false
 
-# parse flags
+# Parse flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --local-only)
@@ -34,61 +37,82 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Step 1: Package the Lambda Function (run once for both modes)
+echo "🧩 Running module: 01_package_lambda.sh"
+bash "${SCRIPT_DIR}/deploy/modules/01_package_lambda.sh"
+
 if $LOCAL_ONLY; then
   echo "🚀 Starting full local deployment with automated tests using SAM CLI..."
 
-  echo ""
-  echo "🧩 Running module: 01_package_lambda.sh"
-  bash "$(dirname "$0")/modules/01_package_lambda.sh"
-
-  echo ""
+  # Step 2: Build the SAM Project
   echo "📦 Building SAM project..."
   sam build || {
     echo "❌ SAM build failed."
     exit 1
   }
 
-  echo ""
-  echo "🚀 Starting local API with SAM..."
-  # Create env.json for SAM
-  cat > env.json << EOF
-  {
-    "AuthFunction": {
-      "DYNAMO_TABLE": "AuthUsers",
-      "DOMAIN": "localhost",
-      "COGNITO_USER_POOL_ID": "local-pool",
-      "COGNITO_CLIENT_ID": "testclientid",
-      "JWT_SECRET": "your-secret-key",
-      "IS_LOCAL": "true",
-      "AWS_SAM_LOCAL": "true"
-    }
+  # Step 3: Create Configuration File
+  echo "🚀 Preparing configuration file for SAM..."
+  # Note: IS_LOCAL is set to "true" to ensure local testing behavior
+  cat > "${SCRIPT_DIR}/env.json" << EOF
+{
+  "AuthFunction": {
+    "DYNAMO_TABLE": "AuthUsers",
+    "DOMAIN": "localhost",
+    "COGNITO_USER_POOL_ID": "local-pool",
+    "COGNITO_CLIENT_ID": "testclientid",
+    "JWT_SECRET": "your-secret-key",
+    "IS_LOCAL": "true",
+    "AWS_SAM_LOCAL": "true"
   }
+}
 EOF
 
-  # Start SAM local API in the background
-  sam local start-api --docker-network host --env-vars env.json --port 3000 --debug --container-env-vars "{\"IS_LOCAL\":\"true\",\"AWS_SAM_LOCAL\":\"true\",\"DYNAMO_TABLE\":\"AuthUsers\",\"DOMAIN\":\"localhost\",\"COGNITO_USER_POOL_ID\":\"local-pool\",\"COGNITO_CLIENT_ID\":\"testclientid\",\"JWT_SECRET\":\"your-secret-key\"}" &
+  # Verify the file (optional debug)
+  if [ ! -f "${SCRIPT_DIR}/env.json" ]; then
+    echo "❌ Error: env.json was not created."
+    exit 1
+  fi
+  echo "✅ Configuration file created at ${SCRIPT_DIR}"
+
+  # Validate JSON (optional debug)
+  if ! jq -e . "${SCRIPT_DIR}/env.json" > /dev/null 2>&1; then
+    echo "❌ Error: env.json contains invalid JSON."
+    exit 1
+  fi
+
+  # Step 4: Start the Local API
+  echo "🚀 Starting local API with SAM..."
+  CONTAINER_ENV_PATH="${SCRIPT_DIR}/env.json"  # Use the same file for container env vars
+  echo "Using container env path: $CONTAINER_ENV_PATH"
+  PORT=3000
+  # Check if port is in use and try an alternative if needed
+  if lsof -i :$PORT > /dev/null 2>&1; then
+    echo "⚠️ Port $PORT is in use. Trying port 3001..."
+    PORT=3001
+  fi
+  sam local start-api --docker-network host --env-vars "${SCRIPT_DIR}/env.json" --port $PORT --debug --container-env-vars "$CONTAINER_ENV_PATH" &
   SAM_PID=$!
-  sleep 10  # Increased wait time for API to stabilize
+  sleep 10  # Wait for API to stabilize
 
   # Check if SAM is running
   if ! ps -p $SAM_PID > /dev/null; then
     echo "❌ Failed to start SAM local API."
     exit 1
   fi
-  echo "✅ auth-lambda is up on http://localhost:3000"
+  echo "✅ auth-lambda is up on http://localhost:$PORT"
 
-  # Automated Tests
-  echo ""
+  # Step 5: Run Automated Tests
   echo "🔍 Running automated tests..."
 
   # Test 1: Initial Login
   echo "🧪 Test 1: Initial Login"
-  LOGIN_RESPONSE=$(curl -s -X POST http://localhost:3000/login \
+  LOGIN_RESPONSE=$(curl -s -X POST http://localhost:$PORT/login \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d 'username=test@example.com&password=InitialPass123!')
-  if [[ "$(echo "$LOGIN_RESPONSE" | jq -r '.message')" == "First login detected. Please change your password." &&
-        "$(echo "$LOGIN_RESPONSE" | jq -r '.requires_change')" == "true" &&
-        "$(echo "$LOGIN_RESPONSE" | jq -r '.token')" == "null" ]]; then
+  if [[ "$(echo "$LOGIN_RESPONSE" | jq -r '.message' 2>/dev/null)" == "First login detected. Please change your password." &&
+        "$(echo "$LOGIN_RESPONSE" | jq -r '.requires_change' 2>/dev/null)" == "true" &&
+        "$(echo "$LOGIN_RESPONSE" | jq -r '.token' 2>/dev/null)" == "null" ]]; then
     echo "✅ Test 1 Passed: Initial login detected."
   else
     echo "❌ Test 1 Failed: Expected {\"message\":\"First login detected. Please change your password.\",\"requires_change\":true,\"token\":null}, got: $LOGIN_RESPONSE"
@@ -98,10 +122,10 @@ EOF
 
   # Test 2: Change Password
   echo "🧪 Test 2: Change Password"
-  CHANGE_RESPONSE=$(curl -s -X POST http://localhost:3000/change-password \
+  CHANGE_RESPONSE=$(curl -s -X POST http://localhost:$PORT/change-password \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d 'username=test@example.com&old_password=InitialPass123!&new_password=NewPass123!')
-  if [[ "$(echo "$CHANGE_RESPONSE" | jq -r '.message')" == "Password changed. Proceed to TOTP setup." ]]; then
+  if [[ "$(echo "$CHANGE_RESPONSE" | jq -r '.message' 2>/dev/null)" == "Password changed. Proceed to TOTP setup." ]]; then
     echo "✅ Test 2 Passed: Password changed."
   else
     echo "❌ Test 2 Failed: Expected {\"message\":\"Password changed. Proceed to TOTP setup.\"}, got: $CHANGE_RESPONSE"
@@ -111,13 +135,13 @@ EOF
 
   # Test 3: Setup TOTP
   echo "🧪 Test 3: Setup TOTP"
-  TOTP_SECRET=$(echo "$LOGIN_RESPONSE" | jq -r '.message' | grep -o 'Use secret: [A-Z0-9]*' | cut -d' ' -f3)
+  TOTP_SECRET=$(echo "$CHANGE_RESPONSE" | jq -r '.totp_secret' 2>/dev/null)
   if [ -n "$TOTP_SECRET" ]; then
     TOTP_CODE=$(python3 -c "import pyotp; print(pyotp.TOTP('$TOTP_SECRET').now())" 2>/dev/null || echo "123456")
-    TOTP_RESPONSE=$(curl -s -X POST http://localhost:3000/setup-totp \
+    TOTP_RESPONSE=$(curl -s -X POST http://localhost:$PORT/setup-totp \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "username=test@example.com&totp_code=$TOTP_CODE&token=dummy-jwt-token")
-    if [[ "$(echo "$TOTP_RESPONSE" | jq -r '.message')" == "TOTP setup complete. Proceed to biometric setup." ]]; then
+    if [[ "$(echo "$TOTP_RESPONSE" | jq -r '.message' 2>/dev/null)" == "TOTP setup complete. Proceed to biometric setup." ]]; then
       echo "✅ Test 3 Passed: TOTP setup complete."
     else
       echo "❌ Test 3 Failed: Expected {\"message\":\"TOTP setup complete. Proceed to biometric setup.\"}, got: $TOTP_RESPONSE"
@@ -132,10 +156,10 @@ EOF
 
   # Test 4: Setup Biometric
   echo "🧪 Test 4: Setup Biometric"
-  BIOMETRIC_RESPONSE=$(curl -s -X POST http://localhost:3000/setup-biometric \
+  BIOMETRIC_RESPONSE=$(curl -s -X POST http://localhost:$PORT/setup-biometric \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "username=test@example.com&token=dummy-jwt-token")
-  if [[ "$(echo "$BIOMETRIC_RESPONSE" | jq -r '.message')" == "Biometric setup complete. Login with biometrics next time." ]]; then
+  if [[ "$(echo "$BIOMETRIC_RESPONSE" | jq -r '.message' 2>/dev/null)" == "Biometric setup complete. Login with biometrics next time." ]]; then
     echo "✅ Test 4 Passed: Biometric setup complete."
   else
     echo "❌ Test 4 Failed: Expected {\"message\":\"Biometric setup complete. Login with biometrics next time.\"}, got: $BIOMETRIC_RESPONSE"
@@ -158,12 +182,9 @@ echo "🚀 Starting full deployment with teardown…"
 
 # Perform complete teardown before deployment
 echo "🔥 Initiating teardown of existing resources…"
-"$(dirname "$0")/teardown_backend.sh"
+"${SCRIPT_DIR}/deploy/teardown_backend.sh"
 
 echo "🚀 Proceeding with deployment…"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULES="$SCRIPT_DIR/modules"
 
 export LAMBDA_NAME="auth-function"
 export ZIP_FILE="auth_backend.zip"
@@ -190,7 +211,7 @@ fi
 # Increment version
 VERSION_NUM=$(echo "$CURRENT_VERSION" | awk -F'.' '{print $1*100 + $2}' | bc)
 NEW_VERSION_NUM=$((VERSION_NUM + 1))
-NEW_VERSION=$(printf "%.2f" "$(echo "$NEW_VERSION_NUM/100" | bc -l)")
+NEW_VERSION=$(printf "%.2f" "$(echo "$NEW_VERSION_NUM/100" | bc -l))
 
 # Generate a new SECRET_KEY securely and update template.yml
 SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
@@ -199,7 +220,6 @@ echo "📝 Updated version in $TEMPLATE_FILE to v${NEW_VERSION} with new SECRET_
 
 # Run deployment modules
 for step in \
-  01_package_lambda.sh \
   02_create_iam_role.sh \
   03_deploy_lambda.sh \
   04_setup_api_gateway.sh \
@@ -209,7 +229,7 @@ for step in \
 do
   echo ""
   echo "🧩 Running module: $step"
-  . "$MODULES/$step" || {
+  . "${SCRIPT_DIR}/deploy/modules/$step" || {
     echo "❌ Module $step failed. Aborting deployment."
     exit 1
   }
@@ -218,40 +238,13 @@ done
 # Update CloudFormation stack with the new version
 if [ "$DRY_RUN" != "true" ]; then
   echo "🔄 Updating CloudFormation stack with new version..."
-  aws cloudformation update-stack \
+  aws cloudformation deploy \
     --stack-name auth-stack \
-    --template-body file://template.yml \
+    --template-file "$TEMPLATE_FILE" \
     --region us-east-1 \
     --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-    --parameters ParameterKey=UpdateTrigger,ParameterValue=$(date +%s) \
-    ParameterKey=JwtSecretParameter,ParameterValue="${SECRET_KEY}" \
-    || {
-      echo "⚠️ Stack update failed, checking if stack exists..."
-      if aws cloudformation describe-stacks --stack-name auth-stack --region us-east-1 >/dev/null 2>&1; then
-        echo "ℹ️ Stack exists, attempting update again with full capabilities..."
-        aws cloudformation update-stack \
-          --stack-name auth-stack \
-          --template-body file://template.yml \
-          --region us-east-1 \
-          --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-          --parameters ParameterKey=UpdateTrigger,ParameterValue=$(date +%s) \
-          ParameterKey=JwtSecretParameter,ParameterValue="${SECRET_KEY}"
-      else
-        echo "⚠️ Stack does not exist, creating new stack..."
-        aws cloudformation create-stack \
-          --stack-name auth-stack \
-          --template-body file://template.yml \
-          --region us-east-1 \
-          --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-          --parameters ParameterKey=UpdateTrigger,ParameterValue=$(date +%s) \
-          ParameterKey=JwtSecretParameter,ParameterValue="${SECRET_KEY}"
-      fi
-    }
-  aws cloudformation wait stack-create-complete --stack-name auth-stack --region us-east-1 || {
-    echo "⚠️ Stack creation failed. Check status..."
-    aws cloudformation describe-stack-events --stack-name auth-stack --region us-east-1
-    exit 1
-  }
+    --parameter-overrides UpdateTrigger=$(date +%s) JwtSecretParameter="${SECRET_KEY}" \
+    --no-fail-on-empty-changeset
   echo "✅ CloudFormation stack updated or created."
 fi
 
