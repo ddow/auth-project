@@ -49,11 +49,12 @@ Resources:
   AuthFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: dashboard-app/backend/build/
+      CodeUri: ./dashboard-app/backend/
       Handler: main.handler
       Runtime: python3.12
       Architectures:
         - x86_64
+      Timeout: 20
       Environment:
         Variables:
           DYNAMO_TABLE: AuthUsers
