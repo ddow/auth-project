@@ -11,7 +11,6 @@ import os
 import logging
 from typing import Optional
 
-# Configure logging and ensure a handler exists
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -19,23 +18,19 @@ if not logger.handlers:
     logger.addHandler(logging.StreamHandler())
 logger.info("1. Lambda function starting...")
 
-# Log environment variables for debugging
 logger.info("2. Environment variables loaded: %s", {k: v for k, v in os.environ.items()})
 is_local = os.getenv("IS_LOCAL", os.getenv("AWS_SAM_LOCAL", "false")).lower() == "true"
 logger.info("3. IS_LOCAL set to: %s", is_local)
 
-# Initialize CryptContext with optimized bcrypt configuration
 logger.info("4. Initializing CryptContext with bcrypt rounds: 12...")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__default_rounds=12)
 logger.info("5. CryptContext initialized")
 
-# Initialize FastAPI app
 logger.info("6. Initializing FastAPI app...")
 api_gateway_base_path = "" if is_local else "/Prod"
 app = FastAPI(root_path=api_gateway_base_path)
 logger.info("7. FastAPI app initialized")
 
-# Secrets Manager setup with retry logic
 logger.info("8. Initializing Secrets Manager client...")
 secrets_endpoint = "http://host.docker.internal:4566" if is_local else None
 max_retries = 5
@@ -43,7 +38,7 @@ retry_delay = 2
 for attempt in range(max_retries):
     try:
         secrets_client = boto3.client("secretsmanager", endpoint_url=secrets_endpoint, region_name="us-east-1")
-        secrets_client.get_secret_value(SecretId="UserCredentials")  # Test connection
+        secrets_client.get_secret_value(SecretId="UserCredentials")
         logger.info("9. Secrets Manager client initialized, endpoint: %s", secrets_endpoint or "AWS")
         break
     except Exception as e:
@@ -60,7 +55,6 @@ logger.info("11. Setting JWT credentials...")
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key")
 logger.info("12. Credentials set: JWT_SECRET=%s", JWT_SECRET[:5])
 
-# Health endpoint for readiness check
 @app.get("/health")
 async def health():
     logger.info("13. Health check executed")
@@ -106,20 +100,7 @@ async def login(username: str = Form(...), password: str = Form(...)):
         user = get_user(username)
         logger.info("25. User retrieval completed, user: %s", user)
         if not user:
-            logger.info("26. User not found, creating new user")
-            initial_hash = pwd_context.hash(password)
-            logger.info("27. Hashing password for new user: %s", initial_hash)
-            new_user = {"password": initial_hash, "requires_change": True, "totp_secret": "", "biometric_key": ""}
-            try:
-                response = secrets_client.get_secret_value(SecretId="UserCredentials")
-                users = json.loads(response["SecretString"])
-            except secrets_client.exceptions.ResourceNotFoundException:
-                users = {}
-            users[username] = new_user
-            secrets_client.update_secret(SecretId="UserCredentials", SecretString=json.dumps(users))
-            user = get_user(username)
-            if not user:
-                raise HTTPException(status_code=400, detail="User creation failed")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
         logger.info("28. Verifying password for user: %s, hash: %s", username, user["password"])
         if not verify_password(password, user["password"]):

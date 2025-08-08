@@ -12,7 +12,7 @@ echo "🔍 Running automated tests..."
 echo "🧪 Test 1: Initial Login"
 LOGIN_RESPONSE=$(curl -s -X POST http://localhost:$PORT/login \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d 'username=test@example.com&password=InitialPass123!')
+  -d 'username=test@example.com&password=password')
 if [[ "$(echo "$LOGIN_RESPONSE" | jq -r '.message' 2>/dev/null)" == "First login detected. Please change your password." &&
       "$(echo "$LOGIN_RESPONSE" | jq -r '.requires_change' 2>/dev/null)" == "true" &&
       "$(echo "$LOGIN_RESPONSE" | jq -r '.token' 2>/dev/null)" == "null" ]]; then
@@ -26,7 +26,7 @@ fi
 echo "🧪 Test 2: Change Password"
 CHANGE_RESPONSE=$(curl -s -X POST http://localhost:$PORT/change-password \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d 'username=test@example.com&old_password=InitialPass123!&new_password=NewPass123!')
+  -d 'username=test@example.com&old_password=password&new_password=NewPass123!')
 if [[ "$(echo "$CHANGE_RESPONSE" | jq -r '.message' 2>/dev/null)" == "Password changed. Proceed to TOTP setup." ]]; then
   echo "✅ Test 2 Passed: Password changed."
 else
