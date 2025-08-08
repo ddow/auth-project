@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy/modules/06_run_tests.sh
+# deploy/modules/run_tests.sh
 
 set -euo pipefail
 

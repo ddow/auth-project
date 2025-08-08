@@ -14,7 +14,7 @@ set -euo pipefail
 #   ./deploy/deploy_backend.sh [--local-only]
 #
 # Flags:
-#   --local-only    only build and run locally (using SAM CLI) with automated tests,
+#   --local-only    only run locally (using SAM CLI) with automated tests,
 #                   skip all AWS deploy steps
 # ---------------------------------------------------------
 
@@ -40,140 +40,97 @@ done
 # Export LOCAL_ONLY for subprocesses (optional backup)
 export LOCAL_ONLY
 
-# Cleanup function (deferred to the end)
-cleanup() {
-  echo "Executing final cleanup of all resources..."
-  if $LOCAL_ONLY; then
-    if [ -f /tmp/dynamo_pid ]; then
-      docker stop $(cat /tmp/dynamo_pid) 2>/dev/null || true
-      docker rm $(cat /tmp/dynamo_pid) 2>/dev/null || true
-      rm -f /tmp/dynamo_pid
-      echo "✅ DynamoDB container cleanup completed."
-    fi
-    kill $(pgrep -f "sam local start-api") 2>/dev/null || true
-    echo "✅ SAM API process cleanup attempted."
+# Trap for cleanup on failure
+trap 'cleanup_on_failure' ERR
 
-    echo "Removing all containers..."
-    docker stop $(docker ps -a -q) 2>/dev/null || true
-    docker rm $(docker ps -a -q) 2>/dev/null || true
-    echo "✅ All containers removed."
-
-    echo "Removing all images..."
-    docker rmi -f $(docker images -q) 2>/dev/null || true
-    echo "✅ All images removed."
-
-    echo "Releasing ports 8000, 3000, 3001..."
-    for port in 8000 3000 3001; do
-      if lsof -i :$port > /dev/null 2>&1; then
-        lsof -i :$port -t | xargs kill -9 2>/dev/null || true
-        sleep 1
-        echo "✅ Port $port released."
-      fi
-    done
-
-    echo "Verifying daemon state..."
-    if ! docker info > /dev/null 2>&1; then
-      echo "⚠️ Daemon issue detected. Restarting Docker Desktop..."
-      open -a Docker
-      sleep 10
-    fi
-    echo "✅ Daemon state verified."
-
-    echo "Removing temporary files..."
-    ls /tmp/dynamo_pid 2>/dev/null && rm -f /tmp/dynamo_pid
-    echo "✅ Temporary files cleaned."
+# Cleanup on failure function
+cleanup_on_failure() {
+  if [ $LOCAL_ONLY = true ]; then
+    echo "Deployment failed, initiating cleanup..."
+    bash "${SCRIPT_DIR}/deploy/modules/cleanup_local.sh"
   fi
-
-  echo "✅ All local resources cleaned up on final exit."
+  exit 1
 }
 
 # Step 1: Build the SAM Project
-echo "🧩 Running sam build..."
-sam build
+echo "🧩 Running module: sam_build.sh"
+bash "${SCRIPT_DIR}/deploy/modules/sam_build.sh"
 
 # Validate build output
 echo "🧩 Validating build output..."
-if [ ! -f .aws-sam/build/AuthFunction/main.py ]; then
-  echo "❌ Error: main.py not found in .aws-sam/build/AuthFunction. Check CodeUri in template.yaml."
+if [ ! -f dashboard-app/backend/main.py ] && [ ! -f .aws-sam/build/AuthFunction/main.py ]; then
+  echo "❌ Error: main.py not found in dashboard-app/backend or .aws-sam/build/AuthFunction. Check source files or Makefile output."
   exit 1
 fi
 echo "✅ Build output validated: main.py present."
 
-# Common step: Package the Lambda Function
-echo "🧩 Running module: 01_package_lambda.sh"
-bash "${SCRIPT_DIR}/deploy/modules/01_package_lambda.sh" "$LOCAL_ONLY"
-
 if $LOCAL_ONLY; then
-  echo "🚀 Starting full local deployment with automated tests using SAM CLI..."
+  echo "🚀 Starting full local deployment with automated tests..."
 
-  # Step 3: Create Configuration File
-  echo "🧩 Running module: 03_create_env_json.sh"
-  bash "${SCRIPT_DIR}/deploy/modules/03_create_env_json.sh" "$LOCAL_ONLY"
+  # Start LocalStack for Secrets Manager
+  echo "🧩 Starting LocalStack..."
+  localstack start -d
+  export LOCALSTACK_HOST=localhost
+  export AWS_DEFAULT_REGION=us-east-1
+  echo "✅ LocalStack environment configured."
 
-  # Step 4: Setup DynamoDB (local or remote)
-  echo "🧩 Running module: 04_setup_dynamodb.sh"
-  bash "${SCRIPT_DIR}/deploy/modules/04_setup_dynamodb.sh" "$LOCAL_ONLY" --keep-container  # Keep container running
+  # Step 2: Create Configuration File
+  echo "🧩 Running module: create_env_json.sh"
+  bash "${SCRIPT_DIR}/deploy/modules/create_env_json.sh" "$LOCAL_ONLY"
 
-  # Step 5: Manage API (local startup or remote config)
-  echo "🧩 Running module: 05_manage_api.sh"
-  bash "${SCRIPT_DIR}/deploy/modules/05_manage_api.sh" "$LOCAL_ONLY" &
+  # Step 3: Setup LocalStack Secret
+  echo "🧩 Running module: setup_secretsmanager.sh"
+  bash "${SCRIPT_DIR}/deploy/modules/setup_secretsmanager.sh" "$LOCAL_ONLY"
+
+  # Step 4: Manage API (local startup)
+  echo "🧩 Running module: manage_api.sh"
+  bash "${SCRIPT_DIR}/deploy/modules/manage_api.sh" "$LOCAL_ONLY" &
   SAM_PID=$!
   echo "✅ SAM API process started with PID: $SAM_PID"
 
-  if $LOCAL_ONLY; then
-    # Wait for API readiness with curl check instead of sleep
-    echo "Waiting for API to be ready at http://localhost:3000/health..."
-    until curl -s -f -o /dev/null "http://localhost:3000/health"; do
-      sleep 1
-    done
-    echo "API is ready."
-    echo "✅ auth-lambda is up on http://localhost:3000"
-  fi
-
-  # Check if SAM is running for local mode
-  if $LOCAL_ONLY && ! ps -p $SAM_PID > /dev/null; then
-    echo "❌ Failed to start SAM local API."
-    if [ -f /tmp/dynamo_pid ]; then
-      echo "Cleaning up DynamoDB container due to API failure..."
-      docker stop $(cat /tmp/dynamo_pid) 2>/dev/null || true
-      docker rm $(cat /tmp/dynamo_pid) 2>/dev/null || true
-      rm -f /tmp/dynamo_pid
-      echo "✅ DynamoDB cleanup attempted."
+  # Wait for API readiness with timeout (90 seconds)
+  echo "Waiting for API to be ready at http://localhost:3000/health..."
+  TIMEOUT=90
+  COUNTER=0
+  until curl -s -f -o /dev/null "http://localhost:3000/health"; do
+    sleep 1
+    COUNTER=$((COUNTER + 1))
+    if [ $COUNTER -ge $TIMEOUT ]; then
+      echo "❌ API readiness timeout after $TIMEOUT seconds."
+      exit 1
     fi
+  done
+  echo "API is ready."
+  echo "✅ auth-lambda is up on http://localhost:3000"
+
+  # Check if SAM is running
+  if ! ps -p $SAM_PID > /dev/null; then
+    echo "❌ Failed to start SAM local API."
     exit 1
   fi
 
-  # Step 6: Run Automated Tests (only for local)
-  if $LOCAL_ONLY; then
-    echo "🧩 Running module: 06_run_tests.sh"
-    bash "${SCRIPT_DIR}/deploy/modules/06_run_tests.sh" "$LOCAL_ONLY"
-  fi
+  # Step 5: Run Automated Tests
+  echo "🧩 Running module: run_tests.sh"
+  bash "${SCRIPT_DIR}/deploy/modules/run_tests.sh" "$LOCAL_ONLY"
 else
-  echo "🚀 Starting full deployment with teardown…"
+  echo "🚀 Starting full production deployment..."
 
   # Perform complete teardown (only at the end for remote)
-  echo "🔥 Initiating final teardown of existing resources…"
+  echo "🔥 Initiating final teardown of existing resources..."
   "${SCRIPT_DIR}/deploy/teardown_backend.sh" "$LOCAL_ONLY"
 
-  # Run deployment modules
-  for step in \
-    04_setup_dynamodb.sh \
-    05_manage_api.sh \
-    07_deploy_lambda.sh \
-    08_update_version.sh \
-    09_cloudformation_deploy.sh
-  do
-    echo ""
-    echo "🧩 Running module: $step"
-    bash "${SCRIPT_DIR}/deploy/modules/$step" "$LOCAL_ONLY" || {
-      echo "❌ Module $step failed. Aborting deployment."
+  # Deploy the stack with SAM
+  echo "🧩 Deploying with SAM..."
+  sam deploy \
+    --template-file .aws-sam/build/template.yml \
+    --stack-name auth-project-stack \
+    --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+    --parameter-overrides Environment=prod \
+    --no-fail-on-empty-changeset || {
+      echo "❌ SAM deployment failed."
       exit 1
     }
-  done
 fi
 
-# Call cleanup only after all steps are complete
-cleanup
-
 echo ""
-echo "✅ Full deployment completed."
+echo "✅ Deployment completed. Local environment remains active for further use."

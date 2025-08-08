@@ -1,85 +1,85 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Authentication API Stack - v0.01
+Description: >
+  auth-project
+  SAM Template for auth backend with Secrets Manager
+
+Globals:
+  Function:
+    Timeout: 20
+    MemorySize: 128
 
 Parameters:
-  UpdateTrigger:
+  Environment:
     Type: String
-    Default: '0'
-  JwtSecretParameter:
-    Type: String
-    Default: your-secret-key
+    Default: local
+    AllowedValues:
+      - local
+      - prod
+    Description: Environment type (local or prod)
 
 Resources:
-  DynamoTable:
-    Type: AWS::DynamoDB::Table
+  UserCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
     Properties:
-      TableName: AuthUsers
-      AttributeDefinitions:
-        - AttributeName: username
-          AttributeType: S
-      KeySchema:
-        - AttributeName: username
-          KeyType: HASH
-      BillingMode: PAY_PER_REQUEST
-
-  CognitoUserPool:
-    Type: AWS::Cognito::UserPool
-    Properties:
-      UserPoolName: AuthUserPool
-      Policies:
-        PasswordPolicy:
-          MinimumLength: 8
-          RequireLowercase: true
-          RequireNumbers: true
-          RequireSymbols: true
-          RequireUppercase: true
-      UsernameAttributes:
-        - email
-
-  CognitoAppClient:
-    Type: AWS::Cognito::UserPoolClient
-    Properties:
-      ClientName: AuthAppClient
-      UserPoolId: !Ref CognitoUserPool
-      GenerateSecret: false
-      ExplicitAuthFlows:
-        - ADMIN_NO_SRP_AUTH
+      Name: UserCredentials
+      Description: Stores user credentials for the auth backend
+      SecretString: !If
+        - IsLocal
+        - '{"test@example.com": {"password": "$2b$12$KIXp8e8f9z2b3c4d5e6f7u", "requires_change": true, "totp_secret": "", "biometric_key": ""}}'
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
 
   AuthFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
     Properties:
-      CodeUri: ./dashboard-app/backend/
       Handler: main.handler
       Runtime: python3.12
-      Architectures:
-        - x86_64
-      Timeout: 20
+      CodeUri: ./dashboard-app/backend
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+                - secretsmanager:UpdateSecret
+              Resource: !GetAtt UserCredentialsSecret.Arn
       Environment:
         Variables:
-          DYNAMO_TABLE: AuthUsers
-          DOMAIN: !Ref AWS::Region
-          COGNITO_USER_POOL_ID: !Ref CognitoUserPool
-          COGNITO_CLIENT_ID: !Ref CognitoAppClient
-          JWT_SECRET: !Ref JwtSecretParameter
-      Policies:
-        - AmazonDynamoDBFullAccess
+          IS_LOCAL: !If [IsLocal, true, false]
+          AWS_ENDPOINT_URL: !If
+            - IsLocal
+            - !Sub "http://host.docker.internal:4566"
+            - !Ref AWS::NoValue
       Events:
-        Api:
+        ApiEvent:
           Type: Api
           Properties:
             Path: /{proxy+}
             Method: ANY
 
-  ServerlessRestApi:
-    Type: AWS::Serverless::Api
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
     Properties:
-      StageName: Prod
-      DefinitionBody:
-        swagger: '2.0'
-        info:
-          title: !Ref AWS::StackName
-        paths:
-          /{proxy+}:
-            x-amazon-apigateway-any-method:
-              responses: {}
+      RestApiId: !Ref ServerlessRestApi
+      StageName: !If
+        - IsLocal
+        - !Ref AWS::NoValue
+        - Prod
+    DependsOn: AuthFunction
+
+Conditions:
+  IsLocal: !Equals [!Ref Environment, local]
+
+Outputs:
+  AuthApi:
+    Description: "API Gateway endpoint URL for Prod stage"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  UserCredentialsSecretArn:
+    Description: "ARN of the UserCredentials secret"
+    Value: !GetAtt UserCredentialsSecret.Arn

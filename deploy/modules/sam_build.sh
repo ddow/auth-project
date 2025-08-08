@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy/modules/02_sam_build.sh
+# deploy/modules/sam_build.sh
 
 set -euo pipefail
 
@@ -15,3 +15,5 @@ sam build \
   echo "❌ SAM build failed."
   exit 1
 }
+
+echo "✅ SAM build completed."
