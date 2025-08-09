@@ -11,7 +11,8 @@ a=1
 b=1
 attempt=1
 
-PASSWORD_HASH=$(python3 -c 'from passlib.context import CryptContext; pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto"); print(pwd_context.hash("password"))')
+# Generate bcrypt hash using Python bcrypt library to match main.py
+PASSWORD_HASH=$(python3 -c 'import bcrypt; print(bcrypt.hashpw("testpassword".encode(), bcrypt.gensalt()).decode())')
 
 while [ $attempt -le $MAX_ATTEMPTS ]; do
   if ! docker ps -q -f "name=localstack" | grep -q .; then
@@ -24,9 +25,10 @@ while [ $attempt -le $MAX_ATTEMPTS ]; do
     continue
   fi
 
-  SECRET_DATA='{"test@example.com": {"password": "'"$PASSWORD_HASH"'", "requires_change": true, "totp_secret": "", "biometric_key": ""}}'
+  # Create UserCredentials secret
+  SECRET_DATA='{"testuser":{"password":"'"$PASSWORD_HASH"'","requires_change":true,"totp_secret":"ABCDEF1234567890","biometric_key":""}}'
   aws --endpoint-url=http://localhost:4566 secretsmanager create-secret --name UserCredentials --secret-string "$SECRET_DATA" || {
-    echo "⚠️ Attempt $attempt/$MAX_ATTEMPTS: Failed to create secret. Retrying in $b seconds..."
+    echo "⚠️ Attempt $attempt/$MAX_ATTEMPTS: Failed to create UserCredentials secret. Retrying in $b seconds..."
     sleep $b
     ((attempt++))
     fib_next=$((a + b))
@@ -35,11 +37,24 @@ while [ $attempt -le $MAX_ATTEMPTS ]; do
     continue
   }
 
-  if aws --endpoint-url=http://localhost:4566 secretsmanager get-secret-value --secret-id UserCredentials > /dev/null 2>&1; then
-    echo "✅ UserCredentials secret created and verified in LocalStack."
+  # Create auth-project-secret for JWT_SECRET
+  JWT_SECRET='{"SECRET_KEY":"'$(openssl rand -hex 32)'"}'
+  aws --endpoint-url=http://localhost:4566 secretsmanager create-secret --name auth-project-secret --secret-string "$JWT_SECRET" || {
+    echo "⚠️ Attempt $attempt/$MAX_ATTEMPTS: Failed to create auth-project-secret. Retrying in $b seconds..."
+    sleep $b
+    ((attempt++))
+    fib_next=$((a + b))
+    a=$b
+    b=$fib_next
+    continue
+  }
+
+  if aws --endpoint-url=http://localhost:4566 secretsmanager get-secret-value --secret-id UserCredentials > /dev/null 2>&1 && \
+     aws --endpoint-url=http://localhost:4566 secretsmanager get-secret-value --secret-id auth-project-secret > /dev/null 2>&1; then
+    echo "✅ UserCredentials and auth-project-secret created and verified in LocalStack."
     exit 0
   else
-    echo "⚠️ Attempt $attempt/$MAX_ATTEMPTS: Failed to verify secret. Retrying in $b seconds..."
+    echo "⚠️ Attempt $attempt/$MAX_ATTEMPTS: Failed to verify secrets. Retrying in $b seconds..."
     sleep $b
     ((attempt++))
     fib_next=$((a + b))
