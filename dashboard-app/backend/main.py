@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Form
 from mangum import Mangum
 import boto3
-from passlib.context import CryptContext
+import bcrypt
 import pyotp
 import jwt
 from datetime import datetime, timedelta
@@ -21,10 +21,6 @@ logger.info("1. Lambda function starting...")
 logger.info("2. Environment variables loaded: %s", {k: v for k, v in os.environ.items()})
 is_local = os.getenv("IS_LOCAL", os.getenv("AWS_SAM_LOCAL", "false")).lower() == "true"
 logger.info("3. IS_LOCAL set to: %s", is_local)
-
-logger.info("4. Initializing CryptContext with bcrypt rounds: 12...")
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__default_rounds=12)
-logger.info("5. CryptContext initialized")
 
 logger.info("6. Initializing FastAPI app...")
 api_gateway_base_path = "" if is_local else "/Prod"
@@ -75,7 +71,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     logger.info("17. Verifying password: plain='%s...', hashed='%s...'", plain_password[:5], hashed_password[:5])
     try:
         logger.info("18. Verifying hash format: %s", hashed_password)
-        result = pwd_context.verify(plain_password, hashed_password)
+        result = bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
         logger.info("19. Password verification result: %s", result)
         return result
     except ValueError as e:
@@ -144,9 +140,11 @@ async def change_password(username: str = Form(...), old_password: str = Form(..
         secret = pyotp.random_base32()
         logger.info("36. Setting totp_secret: %s", secret)
 
+        hashed_new_password = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+
         response = secrets_client.get_secret_value(SecretId="UserCredentials")
         users = json.loads(response["SecretString"])
-        users[username] = {"password": pwd_context.hash(new_password), "requires_change": False, "totp_secret": secret, "biometric_key": user.get("biometric_key", "")}
+        users[username] = {"password": hashed_new_password, "requires_change": False, "totp_secret": secret, "biometric_key": user.get("biometric_key", "")}
         secrets_client.update_secret(SecretId="UserCredentials", SecretString=json.dumps(users))
         logger.info("37. Updated user secret: %s", get_user(username))
         return {"message": "Password changed. Proceed to TOTP setup.", "totp_secret": secret}
