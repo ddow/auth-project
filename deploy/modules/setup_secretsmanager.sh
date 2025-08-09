@@ -12,7 +12,8 @@ b=1
 attempt=1
 
 # Generate bcrypt hash using Python bcrypt library to match main.py
-PASSWORD_HASH=$(python3 -c 'import bcrypt; print(bcrypt.hashpw("testpassword".encode(), bcrypt.gensalt()).decode())')
+PASSWORD_HASH=$(python3 -c 'import bcrypt; print(bcrypt.hashpw("password".encode(), bcrypt.gensalt()).decode())')
+MANUAL_PASSWORD_HASH=$(python3 -c 'import bcrypt; print(bcrypt.hashpw("manualpass".encode(), bcrypt.gensalt()).decode())')
 
 while [ $attempt -le $MAX_ATTEMPTS ]; do
   if ! docker ps -q -f "name=localstack" | grep -q .; then
@@ -25,8 +26,8 @@ while [ $attempt -le $MAX_ATTEMPTS ]; do
     continue
   fi
 
-  # Create UserCredentials secret
-  SECRET_DATA='{"testuser":{"password":"'"$PASSWORD_HASH"'","requires_change":true,"totp_secret":"ABCDEF1234567890","biometric_key":""}}'
+  # Create UserCredentials secret with test@example.com for tests and manualuser for manual testing
+  SECRET_DATA='{"test@example.com":{"password":"'"$PASSWORD_HASH"'","requires_change":true,"totp_secret":"ABCDEF1234567890","biometric_key":""},"manualuser":{"password":"'"$MANUAL_PASSWORD_HASH"'","requires_change":true,"totp_secret":"","biometric_key":""}}'
   aws --endpoint-url=http://localhost:4566 secretsmanager create-secret --name UserCredentials --secret-string "$SECRET_DATA" || {
     echo "⚠️ Attempt $attempt/$MAX_ATTEMPTS: Failed to create UserCredentials secret. Retrying in $b seconds..."
     sleep $b
