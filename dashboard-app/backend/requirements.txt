@@ -1,7 +1,7 @@
 fastapi==0.110.3
 pydantic==2.11.7
 boto3
-bcrypt==3.2.2
+bcrypt==4.2.0
 Mangum
 email-validator==2.0.0.post2
 python-jose[cryptography]
