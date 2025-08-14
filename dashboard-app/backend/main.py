@@ -3,7 +3,7 @@ from mangum import Mangum
 import boto3
 import bcrypt
 import pyotp
-import jwt
+from jose import jwt
 from datetime import datetime, timedelta
 import json
 import time
@@ -34,7 +34,7 @@ retry_delay = 2
 for attempt in range(max_retries):
     try:
         secrets_client = boto3.client("secretsmanager", endpoint_url=secrets_endpoint, region_name="us-east-1")
-        secrets_client.get_secret_value(SecretId="UserCredentials")
+        secrets_client.get_secret_value(SecretId=SECRET_NAME)
         logger.info("9. Secrets Manager client initialized, endpoint: %s", secrets_endpoint or "AWS")
         break
     except Exception as e:
@@ -59,7 +59,7 @@ async def health():
 def get_user(username: str) -> Optional[dict]:
     logger.info("14. Fetching user secret for: %s", username)
     try:
-        response = secrets_client.get_secret_value(SecretId="UserCredentials")
+        response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
         users = json.loads(response["SecretString"])
         logger.info("15. Secret retrieved: %s", {k: v for k, v in users.items() if k == username})
         return users.get(username)
@@ -142,10 +142,10 @@ async def change_password(username: str = Form(...), old_password: str = Form(..
 
         hashed_new_password = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
 
-        response = secrets_client.get_secret_value(SecretId="UserCredentials")
+        response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
         users = json.loads(response["SecretString"])
         users[username] = {"password": hashed_new_password, "requires_change": False, "totp_secret": secret, "biometric_key": user.get("biometric_key", "")}
-        secrets_client.update_secret(SecretId="UserCredentials", SecretString=json.dumps(users))
+        secrets_client.update_secret(SecretId=SECRET_NAME, SecretString=json.dumps(users))
         logger.info("37. Updated user secret: %s", get_user(username))
         return {"message": "Password changed. Proceed to TOTP setup.", "totp_secret": secret}
     except Exception as e:
@@ -189,10 +189,10 @@ async def setup_biometric(username: str = Form(...), token: str = Form(...)):
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
 
-        response = secrets_client.get_secret_value(SecretId="UserCredentials")
+        response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
         users = json.loads(response["SecretString"])
         users[username]["biometric_key"] = "mock-biometric-key"
-        secrets_client.update_secret(SecretId="UserCredentials", SecretString=json.dumps(users))
+        secrets_client.update_secret(SecretId=SECRET_NAME, SecretString=json.dumps(users))
         logger.info("44. Biometric setup completed for user: %s", username)
         return {"message": "Biometric setup complete. Login with biometrics next time."}
     except HTTPException as he:
